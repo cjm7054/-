@@ -146,12 +146,24 @@ nav button.on{color:var(--accent); font-weight:700}
 #toast{position:fixed; left:50%; transform:translateX(-50%); bottom:calc(84px + env(safe-area-inset-bottom,0px));
   background:var(--ink); color:var(--bg); border-radius:999px; padding:9px 18px; font-size:13px; z-index:40; box-shadow:var(--shadow)}
 
+.f textarea{width:100%; box-sizing:border-box; border:1px solid var(--line); background:var(--bg); color:var(--ink); border-radius:10px; padding:11px 12px; font:inherit; resize:vertical; min-height:120px}
+.f textarea:focus{outline:2px solid var(--accent); outline-offset:-1px}
+.hint{font-size:12px; color:var(--sub); margin:0 0 12px}
+.prow{display:flex; align-items:center; gap:10px; padding:9px 2px; border-bottom:1px solid var(--line)}
+.prow:last-child{border-bottom:0}
+.prow .pdir{border:0; border-radius:8px; padding:4px 10px; font-size:12px; font-weight:700; flex-shrink:0}
+.prow .pdir.in{background:var(--accent-soft); color:var(--in)}
+.prow .pdir.out{background:var(--chip); color:var(--out)}
+.prow .pmid{flex:1; min-width:0}
+.prow .pmid .t{font-weight:700}
+.prow .pmid .s{font-size:12px; color:var(--sub); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 :focus-visible{outline:2px solid var(--accent); outline-offset:2px}
 @media (prefers-reduced-motion: no-preference){
   #sheet{animation:up .22s ease}
   @keyframes up{from{transform:translateY(24px); opacity:.6} to{transform:none; opacity:1}}
 }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
 <div id="wrap">
   <div class="top">
@@ -318,7 +330,8 @@ function vLedger(){
   let h = '<div class="monthnav"><button data-act="month" data-d="-1" aria-label="이전 달">‹</button><b class="num">'+y+'년 '+m+'월</b><button data-act="month" data-d="1" aria-label="다음 달">›</button></div>';
   h += '<div class="tiles"><div class="tile"><div class="k">수입</div><div class="v num" style="color:var(--in)">+'+nf.format(inc)+'원</div></div>'
     + '<div class="tile"><div class="k">지출</div><div class="v num" style="color:var(--out)">-'+nf.format(out)+'원</div></div></div>';
-  h += '<button class="addbtn" data-act="add-tx">＋ 거래 추가 (입금·출금)</button>';
+  h += '<div style="display:flex;gap:10px;margin-top:12px"><button class="addbtn" style="margin-top:0" data-act="paste-tx">📋 문자·알림<br>붙여넣기</button><button class="addbtn" style="margin-top:0" data-act="import-tx">📂 은행 파일<br>가져오기</button></div>';
+  h += '<button class="addbtn" style="margin-top:10px" data-act="add-tx">＋ 직접 입력 (입금·출금)</button>';
   h += '<div class="sec"><div class="card">';
   if (!list.length) h += '<div class="empty"><b>'+m+'월 거래가 없어요</b>위의 버튼으로 입금·출금을 기록하면 계좌 잔액에 바로 반영돼요.</div>';
   else {
@@ -535,6 +548,208 @@ function billForm(b){
   );
 }
 
+/* ---------- 자동 인식: 문자·알림 붙여넣기 / 은행 파일 가져오기 ---------- */
+const money = (v) => { const s = String(v??"").replace(/,/g,"").replace(/원/g,"").trim(); const f = parseFloat(s); return isNaN(f) ? 0 : Math.abs(Math.round(f)); };
+function parseAnyDate(v){
+  const s = String(v??"").trim();
+  let m = s.match(/(\d{4})[.\-\/](\d{1,2})[.\-\/](\d{1,2})/);
+  if (m) return m[1]+"-"+String(+m[2]).padStart(2,"0")+"-"+String(+m[3]).padStart(2,"0");
+  m = s.match(/^(\d{4})(\d{2})(\d{2})/);
+  if (m) return m[1]+"-"+m[2]+"-"+m[3];
+  return null;
+}
+function parseMessages(text){
+  const chunks = String(text||"").split(/\n\s*\n|(?=\[Web발신\])/).map(s=>s.trim()).filter(Boolean);
+  const rows = [];
+  const now = new Date(), nowY = now.getFullYear(), nowM = now.getMonth()+1;
+  for (const c of chunks){
+    let amount = 0;
+    for (const m of c.matchAll(/([\d,]{2,})원/g)){
+      if (/잔액|잔고|한도|누적/.test(c.slice(Math.max(0,m.index-8), m.index))) continue;
+      amount = money(m[1]); break;
+    }
+    if (amount<=0) continue;
+    const dir = (/입금|충전|캐시백|환불|환급|급여|이자/.test(c) && !/출금/.test(c)) ? "in" : "out";
+    let date = parseAnyDate(c) || todayStr();
+    if (!parseAnyDate(c)){
+      const dm = c.match(/(\d{1,2})[\/.](\d{1,2})(?!\d)/) || c.match(/(\d{1,2})월\s*(\d{1,2})일/);
+      if (dm){
+        const mo = +dm[1], da = +dm[2];
+        if (mo>=1 && mo<=12 && da>=1 && da<=31){
+          const y = mo>nowM ? nowY-1 : nowY;
+          date = y+"-"+String(mo).padStart(2,"0")+"-"+String(da).padStart(2,"0");
+        }
+      }
+    }
+    let memo = "";
+    const lines = c.split("\n").map(s=>s.trim()).filter(Boolean);
+    for (let i=lines.length-1; i>=0; i--){
+      const L = lines[i];
+      if (/원|\[Web발신\]|\d{1,2}:\d{2}|잔액|승인|일시불|할부|누적|체크|신용/.test(L)) continue;
+      if (L.length>=2 && L.length<=25){ memo = L; break; }
+    }
+    const category = /SKT|KT\b|LG ?U|통신/i.test(c) ? "통신" : /급여|월급/.test(c) ? "급여" : "기타";
+    rows.push({dir, amount, date, memo, category});
+  }
+  return rows;
+}
+function tableToRows(arr){
+  let hi = -1, C = null;
+  for (let i=0; i<Math.min(arr.length,25); i++){
+    const row = (arr[i]||[]).map(x=>String(x??"").trim());
+    const di = row.findIndex(x=>/거래일|일시|날짜|이용일/.test(x));
+    if (di<0) continue;
+    hi = i;
+    C = { date: di,
+      inC: row.findIndex(x=>/입금|맡기신/.test(x)),
+      outC: row.findIndex(x=>/출금|찾으신|이용금액|결제금액/.test(x)),
+      amt: row.findIndex(x=>/거래금액|^금액$/.test(x)),
+      type: row.findIndex(x=>/구분|유형/.test(x)),
+      memo: row.findIndex(x=>/내용|적요|가맹점|거래처|메모|받는분|보낸분|상호/.test(x)) };
+    break;
+  }
+  if (hi<0) return [];
+  const rows = [];
+  for (let i=hi+1; i<arr.length; i++){
+    const r = arr[i]||[];
+    const date = parseAnyDate(r[C.date]); if (!date) continue;
+    let dir = null, amount = 0;
+    const inV = C.inC>=0 ? money(r[C.inC]) : 0;
+    const outV = C.outC>=0 ? money(r[C.outC]) : 0;
+    if (inV>0){ dir="in"; amount=inV; }
+    else if (outV>0){ dir="out"; amount=outV; }
+    else if (C.amt>=0){
+      const raw = String(r[C.amt]??"");
+      amount = money(raw);
+      if (amount<=0) continue;
+      const ty = C.type>=0 ? String(r[C.type]??"") : "";
+      dir = (/입금|입/.test(ty) && !/출/.test(ty) && !raw.trim().startsWith("-")) ? "in" : "out";
+    } else continue;
+    if (!dir || amount<=0) continue;
+    rows.push({dir, amount, date, memo: C.memo>=0 ? String(r[C.memo]??"").trim() : "", category:"기타"});
+  }
+  return rows;
+}
+async function fileToRows(file){
+  if (typeof XLSX !== "undefined"){
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, {type:"array"});
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    return tableToRows(XLSX.utils.sheet_to_json(ws, {header:1, raw:false, defval:""}));
+  }
+  const text = await file.text();
+  return tableToRows(text.split(/\r?\n/).map(l=>l.split(",")));
+}
+function previewHTML(rows){
+  let h = '<div class="f"><label>인식된 거래 — 체크된 항목만 저장돼요. 입금/출금 버튼을 누르면 구분이 바뀌어요.</label>';
+  rows.forEach((r,i)=>{
+    h += '<div class="prow"><input type="checkbox" checked id="pc'+i+'">'
+      + '<button type="button" class="pdir '+r.dir+'" data-flip="'+i+'">'+(r.dir==="in"?"입금":"출금")+'</button>'
+      + '<div class="pmid"><div class="t num" style="color:var(--'+(r.dir==="in"?"in":"out")+')">'+(r.dir==="in"?"+":"-")+nf.format(r.amount)+'원</div>'
+      + '<div class="s num">'+r.date+(r.memo?' · '+esc(r.memo):'')+'</div></div></div>';
+  });
+  return h + '</div>';
+}
+function attachPreview(rows, shown){
+  const extra = rows.length>shown ? '<p class="hint">외 '+(rows.length-shown)+'건도 저장에 모두 포함돼요.</p>' : '';
+  const paint = () => { $("f-preview").innerHTML = previewHTML(rows.slice(0,shown)) + extra; };
+  paint();
+  $("f-preview").onclick = (e)=>{
+    const b = e.target.closest("[data-flip]"); if (!b) return;
+    const i = +b.dataset.flip;
+    const checks = rows.slice(0,shown).map((_,j)=>$("pc"+j).checked);
+    rows[i].dir = rows[i].dir==="in" ? "out" : "in";
+    paint();
+    checks.forEach((v,j)=>{ const c=$("pc"+j); if(c) c.checked=v; });
+  };
+}
+async function saveParsedRows(rows, accId, applyBal){
+  const existing = new Set(S.tx.map(t=>[t.date,t.dir,t.amount,t.memo||""].join("|")));
+  let saved=0, dup=0, delta=0;
+  const col = S.db.collection("tx");
+  for (const r of rows){
+    const key = [r.date,r.dir,r.amount,r.memo||""].join("|");
+    if (existing.has(key)){ dup++; continue; }
+    existing.add(key);
+    await col.doc().set({accountId:accId, dir:r.dir, amount:r.amount, category:r.category||"기타", date:r.date, memo:r.memo||"", ts:Date.now()+saved});
+    delta += r.dir==="in" ? r.amount : -r.amount; saved++;
+  }
+  if (applyBal && delta!==0){
+    const a = S.accounts.find(x=>x.id===accId);
+    if (a){ await S.db.doc("accounts/"+accId).update({balance:(a.balance||0)+delta}); a.balance = (a.balance||0)+delta; }
+  }
+  const last = rows.map(r=>r.date).sort().pop();
+  if (last) S.month = {y:+last.slice(0,4), m:+last.slice(5,7)};
+  return {saved, dup};
+}
+function pasteForm(){
+  if (!S.accounts.length){ toast("먼저 계좌를 추가해 주세요"); location.hash="accounts"; return; }
+  const accOpts = S.accounts.map(a=>'<option value="'+a.id+'">'+esc(a.name)+'</option>').join("");
+  let rows = null;
+  openSheet(
+    '<h3>문자·알림 붙여넣기</h3>'
+    + '<p class="hint">은행 입출금 문자나 앱 알림을 복사해 붙여넣으면 금액·구분·날짜·내용을 자동으로 인식해요. 여러 건을 한꺼번에 붙여넣어도 됩니다.</p>'
+    + '<form>'
+    + '<div class="f"><label for="f-paste">알림 내용</label><textarea id="f-paste" placeholder="[Web발신]&#10;토스뱅크&#10;11/02 14:32 출금 12,500원&#10;스타벅스"></textarea></div>'
+    + '<div class="f"><label for="f-acc">기록할 계좌</label><select id="f-acc">'+accOpts+'</select></div>'
+    + '<div class="f" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="f-applybal" checked style="width:auto"><label for="f-applybal" style="margin:0">계좌 잔액에 반영</label></div>'
+    + '<div id="f-preview"></div>'
+    + '<div class="actions"><button type="submit" class="save" id="f-go">인식하기</button></div></form>',
+    async ()=>{
+      if (!rows){
+        const got = parseMessages($("f-paste").value);
+        if (!got.length){ toast("인식할 거래를 찾지 못했어요. 금액(…원)이 포함돼야 해요."); return; }
+        rows = got;
+        attachPreview(rows, rows.length);
+        $("f-go").textContent = "저장하기";
+        return;
+      }
+      const sel = rows.filter((_,i)=> $("pc"+i) && $("pc"+i).checked);
+      if (!sel.length){ toast("저장할 항목을 선택해 주세요"); return; }
+      $("f-go").disabled = true; $("f-go").textContent = "저장 중…";
+      try{
+        const res = await saveParsedRows(sel, $("f-acc").value, $("f-applybal").checked);
+        closeSheet(); toast(res.saved+"건 저장"+(res.dup?" · 중복 "+res.dup+"건 제외":""));
+      }catch(e){ $("f-go").disabled=false; $("f-go").textContent="저장하기"; toast("저장 중 문제가 생겼어요"); }
+    }
+  );
+}
+function importForm(){
+  if (!S.accounts.length){ toast("먼저 계좌를 추가해 주세요"); location.hash="accounts"; return; }
+  const accOpts = S.accounts.map(a=>'<option value="'+a.id+'">'+esc(a.name)+'</option>').join("");
+  let rows = null;
+  openSheet(
+    '<h3>은행 내역 파일 가져오기</h3>'
+    + '<p class="hint">토스뱅크·카카오뱅크 등 은행 앱의 "거래내역 내보내기"로 받은 엑셀·CSV 파일을 선택하면 전체 내역을 한 번에 읽어와요. 이미 저장된 거래는 중복으로 걸러집니다.</p>'
+    + '<form>'
+    + '<div class="f"><label for="f-file">거래내역 파일 (.xlsx, .csv)</label><input type="file" id="f-file" accept=".csv,.xls,.xlsx" required></div>'
+    + '<div class="f"><label for="f-acc">기록할 계좌</label><select id="f-acc">'+accOpts+'</select></div>'
+    + '<div class="f" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="f-applybal" style="width:auto"><label for="f-applybal" style="margin:0">계좌 잔액에 반영 (잔액을 이미 맞춰뒀다면 끄세요)</label></div>'
+    + '<div id="f-preview"></div>'
+    + '<div class="actions"><button type="submit" class="save" id="f-go">파일 읽기</button></div></form>',
+    async ()=>{
+      if (!rows){
+        const file = $("f-file").files[0];
+        if (!file){ toast("파일을 선택해 주세요"); return; }
+        let got = null;
+        try{ got = await fileToRows(file); }catch(e){ toast("파일을 읽지 못했어요"); return; }
+        if (!got || !got.length){ toast("거래를 찾지 못했어요. 날짜·금액 열이 있는 파일인지 확인해 주세요."); return; }
+        rows = got;
+        attachPreview(rows, 8);
+        $("f-go").textContent = rows.length+"건 저장하기";
+        return;
+      }
+      const sel = rows.filter((_,i)=> i>=8 || ($("pc"+i) && $("pc"+i).checked));
+      if (!sel.length){ toast("저장할 항목이 없어요"); return; }
+      $("f-go").disabled = true; $("f-go").textContent = "저장 중…";
+      try{
+        const res = await saveParsedRows(sel, $("f-acc").value, $("f-applybal").checked);
+        closeSheet(); toast(res.saved+"건 저장"+(res.dup?" · 중복 "+res.dup+"건 제외":""));
+      }catch(e){ $("f-go").disabled=false; $("f-go").textContent="다시 저장하기"; toast("저장 중 문제가 생겼어요"); }
+    }
+  );
+}
+
 /* 예시 데이터 삭제 */
 async function clearSamples(){
   try{
@@ -565,6 +780,8 @@ $("main").addEventListener("click", (e)=>{
   if (act==="month"){ const d = parseInt(el.dataset.d,10); let {y,m}=S.month; m+=d; if(m<1){m=12;y--;} if(m>12){m=1;y++;} S.month={y,m}; render(); return; }
   if (act==="add-acc") return accountForm(null);
   if (act==="edit-acc") return accountForm(S.accounts.find(x=>x.id===id));
+  if (act==="paste-tx") return pasteForm();
+  if (act==="import-tx") return importForm();
   if (act==="add-tx") return txForm(null);
   if (act==="edit-tx") return txForm(S.tx.find(x=>x.id===id));
   if (act==="add-loan") return loanForm(null);
